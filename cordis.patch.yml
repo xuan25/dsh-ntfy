@@ -1,0 +1,7 @@
+# dsh-ntfy: cordis bundle patch that registers the plugin in the profile.
+# Configuration is env-only (the NTFY_* variables, see README); there are no
+# profile config fields, so config is empty.
+- insert:
+    - id: dsh-ntfy
+      name: 'dsh-ntfy'
+      config: {}
