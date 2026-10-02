@@ -99,7 +99,8 @@ Semantics:
 
 | Symptom (in `error`) | Cause | Action |
 |---|---|---|
-| `HTTP 401` / `HTTP 403` | Auth missing or wrong | Check the channel's `NTFY_<N>_TOKEN` or `USER`/`PASS` pair in the container env; the `channels` verb shows the `auth` marker. |
+| `HTTP 401` | Auth missing or wrong | Check the channel's `NTFY_<N>_TOKEN` or `USER`/`PASS` pair in the container env; the `channels` verb shows the `auth` marker. |
+| `HTTP 403` | Auth passed but the server refused the publish (e.g. a topic-level publish policy) | Check that topic is writable by the channel's credentials on that server (e.g. the topic must already exist); the credentials are not the cause. |
 | `HTTP 429` | Server rate limit | Wait (ntfy.sh refills slowly; the daily quota resets at midnight UTC), then resend explicitly. |
 | `HTTP 400` | Parameter semantics | The server's error text is in `error`; cross-check `delay` range, `actions` format, topic charset. |
 | `HTTP 404` | Unknown topic or unreachable server path | Check `NTFY_<N>_TOPIC` and the self-hosted `NTFY_<N>_SERVER` base URL against the `channels` output. |
