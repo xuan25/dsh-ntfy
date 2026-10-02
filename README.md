@@ -1,6 +1,10 @@
 # dsh-ntfy
 
-ntfy notification publishing plugin for DSH. Sends messages to [ntfy.sh](https://ntfy.sh) or a self-hosted ntfy server over channels declared in environment variables, optionally overridden by a config layer from a cordis patch file. Pure publisher: no subscribing, no retry, no credentials persisted.
+dsh-ntfy gives a DSH agent a push-notification path: a single tool call publishes a message to an ntfy topic, so job results, alerts, and reports reach the user's device - or any app or feed that subscribes to the topic.
+
+- Works with [ntfy.sh](https://ntfy.sh) or any self-hosted ntfy server
+- Multiple topic channels; one send targets exactly one channel
+- Zero state, zero files, zero runtime dependencies
 
 ## Installation
 
