@@ -6,7 +6,7 @@ whenToUse: "When a task must push a notification to an ntfy topic (alert, status
 
 # dsh-ntfy
 
-Publish notifications to ntfy (ntfy.sh or a self-hosted ntfy server). A channel is an ntfy topic endpoint (server + topic + optional auth); channels are declared in environment variables and read once at boot. The plugin never retries, never fans out, and persists no credentials.
+Publish notifications to ntfy (ntfy.sh or a self-hosted ntfy server). A channel is an ntfy topic endpoint (server + topic + optional auth); channels are declared in environment variables (optionally overridden by the config layer below) and read once at boot. The plugin never retries, never fans out, and persists no credentials.
 
 ## Quick reference
 
@@ -55,6 +55,33 @@ Read once at plugin boot (container env is static; changes need a host restart).
 | `NTFY_DEFAULT_CHANNEL` | no | Channel name used when a send names no channel (matched case-insensitively). A stale value does not fail boot; only the sends that rely on it fail. |
 
 Channels that fail validation are dropped with a boot warning; the remaining channels are unaffected. There is no fan-out: a send always targets exactly one channel.
+
+## Config layer (profile patch)
+
+An optional config layer sits on top of the env contract: a cordis patch entry targeting the plugin id `dsh-ntfy` (the profile's `cordis.patch.yml`, the user-global `~/.dsh/cordis.patch.yml`, or a `--patch` overlay) carries a `config` object whose keys are camelCase mirrors of the env fields above, every key optional:
+
+- `defaultChannel` - mirror of `NTFY_DEFAULT_CHANNEL`
+- `channels` - a map of channel name (same charset as the env channel names) to per-channel keys, camelCase mirrors of the `NTFY_<N>_*` fields: `topic`, `server`, `user`, `pass`, `token`
+
+Example:
+
+```yaml
+- id: dsh-ntfy
+  config:
+    defaultChannel: dash
+    channels:
+      dash:
+        server: https://ntfy.example.com
+```
+
+Semantics:
+
+- One precedence chain: delivered value > env value > built-in default. Keys the layer omits resolve as the env contract, so `config: {}` (or no entry) is exactly the env-only behavior. A layer-declared channel with no topic in either layer is not a channel; it is reported with a boot warning, in the spirit of the env drops.
+- A patch targets a row by id and replaces its whole config: no deep merge, so a layer that overrides one field restates the fields it keeps. Layer order (later replaces earlier): the plugin's own default entry, the profile patch, the user-global patch, any `--patch` overlay - framework semantics.
+- Validation: the layer is validated against a schema before the plugin starts; an unknown key or a topic outside the charset fails the plugin entry at load. Channels the parser drops (half Basic auth pair, token together with Basic auth, an invalid topic) still only warn, as in the env contract.
+- Live effect: with the live patch reload, editing the patch file re-runs the plugin's constructor without a restart (the plugin is stateless, the next call uses the new values); otherwise the change applies at the next restart.
+- Permissions: the agent edits the patch file directly as a plain file operation, under its own file permissions; the plugin provides no tool for changing its own configuration. When the file is not writable, report that honestly; do not work around it.
+- Provenance: the `channels` verb presents values only; a value's source is verified on demand against the patch files and the env contract above.
 
 ## Limits
 

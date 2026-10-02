@@ -29,7 +29,7 @@ function utf8Bytes(s) {
 }
 
 const { DshNtfyPlugin } = await import(path.join(PKG, 'lib', 'index.js'))
-const { parseEnv, resolveChannel, TOPIC_RE, CHANNEL_NAME_RE, DEFAULT_SERVER } = await import(path.join(PKG, 'lib', 'config.js'))
+const { parseEnv, resolveChannel, foldConfig, TOPIC_RE, CHANNEL_NAME_RE, DEFAULT_SERVER } = await import(path.join(PKG, 'lib', 'config.js'))
 const { chunkUtf8 } = await import(path.join(PKG, 'lib', 'chunk.js'))
 const { send, listChannels, buildHeaders, SEND_TIMEOUT_MS } = await import(path.join(PKG, 'lib', 'send.js'))
 const { registerTool, VERBS, PRIORITIES } = await import(path.join(PKG, 'lib', 'tool.js'))
@@ -587,6 +587,142 @@ function fakeCtx() {
   ok('skill: shipped file restored byte-identical', readFileSync(skillPath, 'utf8') === original)
 }
 
+// ── delivered config layer: schema validation + fold semantics ──
+{
+  // the schema: accept matrix (the layer is a camelCase mirror of the env)
+  const validate = (x) => DshNtfyPlugin.Config['~standard'].validate(x)
+  const issues = (x) => (validate(x).issues ?? []).map((i) => i.message)
+  const noIssues = (x) => validate(x).issues === undefined
+
+  ok('cfgschema: an empty layer passes', noIssues({}))
+  ok('cfgschema: absent layers pass (undefined and null, the env-only behavior)', noIssues(undefined) && noIssues(null))
+  ok('cfgschema: the full mirror passes', noIssues({
+    defaultChannel: 'dash',
+    channels: {
+      dash: { topic: 'dash-topic', server: 'https://ntfy.example.com', user: 'u', pass: 'p', token: 't' },
+      'other-1': { topic: 'x'.repeat(64) },
+    },
+  }))
+  ok('cfgschema: a sparse layer passes (every channel key optional)', noIssues({ channels: { dash: { server: 'https://x' } } }))
+  ok('cfgschema: a mixed-case topic in the charset passes (the charset includes upper and lower letters)', noIssues({ channels: { a: { topic: 'Abc_9' } } }))
+  const v = validate({ defaultChannel: 'dash', channels: { dash: { server: 'https://x' } } })
+  ok('cfgschema: the validated value keeps the carried fields verbatim', v.value.defaultChannel === 'dash' && v.value.channels.dash.server === 'https://x' && Object.keys(v.value.channels).join() === 'dash', v.value)
+
+  // the schema: reject matrix (each violation fails the entry loudly)
+  ok('cfgschema: an unknown root key fails (typo guard)', issues({ bogus: 1 }).some((m) => m.includes('unknown key "bogus"') && m.includes('defaultChannel')))
+  ok('cfgschema: an unknown channel key fails (typo guard)', issues({ channels: { dash: { serer: 'x' } } }).some((m) => m.includes('unknown key "serer"') && m.includes('topic')))
+  ok('cfgschema: a channel name outside the charset fails', issues({ channels: { 'Bad_Name': {} } }).length === 1 && issues({ channels: { '9x': {} } }).length === 1)
+  ok('cfgschema: a channel name over 32 characters fails', issues({ channels: { ['a'.repeat(33)]: {} } }).length === 1)
+  ok('cfgschema: an empty topic fails', issues({ channels: { a: { topic: '' } } }).length === 1)
+  ok('cfgschema: a topic outside the charset fails', issues({ channels: { a: { topic: 'has space' } } }).length === 1 && issues({ channels: { a: { topic: 'dot.' } } }).length === 1)
+  ok('cfgschema: a topic over 64 characters fails', issues({ channels: { a: { topic: 'x'.repeat(65) } } }).length === 1)
+  ok('cfgschema: a non-string channel field fails', issues({ channels: { a: { server: 1 } } }).length === 1)
+  ok('cfgschema: a non-object channel value fails', issues({ channels: { a: 'nope' } }).length === 1)
+  ok('cfgschema: a non-object root fails', issues('nope').length === 1)
+  ok('cfgschema: a non-object channels value fails', issues({ channels: [1] }).length === 1)
+
+  // fold semantics: one precedence chain (config value, env value, default)
+  const envBase = {
+    NTFY_DEFAULT_TOPIC: 'env-topic',
+    NTFY_DEFAULT_SERVER: LOCAL,
+    NTFY_DEFAULT_USER: 'u',
+    NTFY_DEFAULT_PASS: 'p',
+    NTFY_SIDE_TOPIC: 'side-topic',
+    NTFY_DEFAULT_CHANNEL: 'default',
+  }
+  const byName = (cfg) => Object.fromEntries(cfg.channels.map((c) => [c.name, c]))
+
+  let f = foldConfig(envBase, { channels: { default: { topic: 'layer-topic' } } }, () => {})
+  eq('fold: the config value beats the env value for the same field', byName(f).default.topic, 'layer-topic')
+  eq('fold: a field the layer omits keeps the env value', byName(f).default.server, LOCAL)
+  eq('fold: auth the layer omits keeps the env values', [byName(f).default.auth.kind, byName(f).default.auth.user], ['basic', 'u'])
+  eq('fold: the built-in default applies to a field in neither layer', byName(f).side.server, DEFAULT_SERVER)
+
+  f = foldConfig(envBase, { defaultChannel: 'side', channels: { default: { server: 'https://other' } } }, () => {})
+  eq('fold: the layer defaultChannel beats the env one (baked into isDefault)', [byName(f).side.isDefault, byName(f).default.isDefault], [true, false])
+  eq('fold: a sparse layer changes only the fields it carries', [byName(f).default.server, byName(f).default.topic, byName(f).default.auth.kind], ['https://other', 'env-topic', 'basic'])
+
+  f = foldConfig(envBase, { channels: { extra: { topic: 'extra-topic', server: LOCAL } } }, () => {})
+  eq('fold: a config-only channel joins the env channels', f.channels.map((c) => c.name), ['default', 'extra', 'side'])
+  eq('fold: the config-only channel resolves its own defaults', [byName(f).extra.topic, byName(f).extra.auth], ['extra-topic', null])
+
+  const dropWarns = []
+  f = foldConfig(envBase, { channels: { default: { token: 'tk' } } }, (m) => dropWarns.push(m))
+  eq('fold: a layer token together with the env Basic pair drops the channel (the env rule)', f.channels.map((c) => c.name), ['side'])
+  ok('fold: the drop reports through the boot warning channel', dropWarns.some((m) => m.includes('default') && m.includes('TOKEN')), dropWarns)
+
+  const halfWarns = []
+  f = foldConfig(envBase, { channels: { ghost: { topic: 'ghost-topic', user: 'g' } } }, (m) => halfWarns.push(m))
+  ok('fold: a config channel with a half Basic pair is dropped (the env rule)', !f.channels.some((c) => c.name === 'ghost') && halfWarns.some((m) => m.includes('ghost') && m.includes('USER')), halfWarns)
+
+  const noTopicWarns = []
+  f = foldConfig(envBase, { channels: { orphan: { server: LOCAL } } }, (m) => noTopicWarns.push(m))
+  eq('fold: a layer-declared channel with no topic in either layer is not a channel', f.channels.map((c) => c.name), ['default', 'side'])
+  ok('fold: the no-topic report names the channel', noTopicWarns.some((m) => m.includes('orphan') && m.includes('no topic')), noTopicWarns)
+
+  const noWarn = []
+  f = foldConfig(envBase, { channels: { default: { server: LOCAL } } }, (m) => noWarn.push(m))
+  eq('fold: a layer entry without a topic stays quiet when the env declares the channel', noWarn.length, 0)
+  eq('fold: the env topic serves the layer entry', [byName(f).default.topic, byName(f).default.server], ['env-topic', LOCAL])
+
+  const envCopy = { ...envBase }
+  eq('fold: a layer of {} is exactly the env-only parse', JSON.stringify(parseEnv(envBase, () => {})), JSON.stringify(foldConfig(envCopy, {}, () => {})))
+  ok('fold: the input env record is not mutated', JSON.stringify(envCopy) === JSON.stringify(envBase))
+
+  // wire level: a layer-carried value behaves exactly like its env counterpart
+  {
+    const layerCfg = foldConfig({ NTFY_A_TOPIC: 'topic-a', NTFY_A_SERVER: LOCAL }, { channels: { a: { topic: 'layer-topic' } } }, () => {})
+    seen.length = 0
+    const r = await send(layerCfg, { body: 'hello' })
+    ok('layer-wire: the layer topic reaches the endpoint', r.ok === true && seen[0].url === '/layer-topic', seen[0]?.url)
+    const snap = JSON.stringify(seen[0])
+    seen.length = 0
+    const envCfg = parseEnv({ NTFY_A_TOPIC: 'layer-topic', NTFY_A_SERVER: LOCAL }, () => {})
+    const r2 = await send(envCfg, { body: 'hello' })
+    ok('layer-wire: the env twin is byte-identical on the wire', r2.ok === true && JSON.stringify(seen[0]) === snap)
+  }
+  {
+    const layerCfg = foldConfig({ NTFY_A_TOPIC: 'topic-a', NTFY_A_SERVER: LOCAL }, { channels: { a: { token: 'layer-tk' } } }, () => {})
+    seen.length = 0
+    const r = await send(layerCfg, { body: 'x' })
+    ok('layer-wire: a layer token reaches the wire as a Bearer header', r.ok === true && seen[0].headers.authorization === 'Bearer layer-tk', JSON.stringify(seen[0].headers))
+    const snap = JSON.stringify(seen[0])
+    seen.length = 0
+    const envCfg = parseEnv({ NTFY_A_TOPIC: 'topic-a', NTFY_A_SERVER: LOCAL, NTFY_A_TOKEN: 'layer-tk' }, () => {})
+    const r2 = await send(envCfg, { body: 'x' })
+    ok('layer-wire: the auth env twin is byte-identical on the wire', r2.ok === true && JSON.stringify(seen[0]) === snap)
+  }
+  {
+    const cfg = foldConfig({ NTFY_A_TOPIC: 'a-topic', NTFY_A_SERVER: LOCAL, NTFY_B_TOPIC: 'b-topic', NTFY_B_SERVER: LOCAL }, { defaultChannel: 'b' }, () => {})
+    seen.length = 0
+    const r = await send(cfg, { body: 'x' })
+    ok('layer-wire: the layer defaultChannel routes the default send', r.ok === true && r.channel === 'b' && seen[0].url === '/b-topic', r)
+  }
+
+  // assembly: the constructor folds the delivered layer (real env scrubbed)
+  {
+    const savedEnv = {}
+    for (const k of Object.keys(process.env)) if (k.startsWith('NTFY_')) { savedEnv[k] = process.env[k]; delete process.env[k] }
+    try {
+      // The real deployment declares all-caps NTFY_* variables; the config
+      // layer synthesizes the same casing, so the two layers write the very
+      // same variables (no case-variant conflict at the parser).
+      const upper = {}
+      for (const [k, val] of Object.entries({ NTFY_MAIN_TOPIC: 'main-topic', NTFY_MAIN_SERVER: LOCAL, NTFY_MAIN_USER: 'u', NTFY_MAIN_PASS: 'p', NTFY_DEFAULT_CHANNEL: 'main' })) upper[k.toUpperCase()] = val
+      Object.assign(process.env, upper)
+      const { ctx, state } = fakeCtx()
+      new DshNtfyPlugin(ctx, { channels: { main: { server: 'https://patched' } } })
+      ok('assembly: a valid layer produces no boot warnings', state.warns.length === 0, state.warns)
+      const out = JSON.parse(await state.tools[0].execute({ verb: 'channels' }))
+      eq('assembly: the folded layer is visible in the channels verb', [out.default, out.channels[0].name, out.channels[0].server, out.channels[0].topic, out.channels[0].auth], ['main', 'main', 'https://patched', 'main-topic', 'basic'])
+      ok('assembly: the channels presentation keeps its shape (no source annotations)', out.channels.every((c) => Object.keys(c).every((k) => ['name', 'server', 'topic', 'auth', 'isDefault'].includes(k))), out.channels)
+    } finally {
+      for (const k of Object.keys(process.env)) if (k.startsWith('NTFY_')) delete process.env[k]
+      Object.assign(process.env, savedEnv)
+    }
+  }
+}
+
 // ── shipped hygiene guards ───────────────────────────────────────
 { // shipped-source hygiene guard: src/ stays self-contained and process-fact-free - a reader
   // needs only the file plus stable external authorities (the ntfy API, the framework API
@@ -628,7 +764,7 @@ function fakeCtx() {
   eq('manifest: entry', manifest.main, './lib/index.js')
   ok('manifest: exports point at entry + types', manifest.exports['.'].default === './lib/index.js' && manifest.exports['.'].types === './lib/index.d.ts')
   ok('manifest: no runtime dependencies', !('dependencies' in manifest))
-  ok('manifest: peer set', ['@deepseek-ai/cordis', '@deepseek-ai/dsh-tools', '@deepseek-ai/dsh-skill', '@deepseek-ai/dsh-system-prompt', 'yaml'].every((p) => p in manifest.peerDependencies))
+  ok('manifest: peer set', ['@deepseek-ai/cordis', '@deepseek-ai/dsh-tools', '@deepseek-ai/dsh-skill', '@deepseek-ai/dsh-system-prompt', '@deepseek-ai/schemastery', 'yaml'].every((p) => p in manifest.peerDependencies))
   eq('manifest: bundle patch pointer', manifest.dsh.bundle.patch, './cordis.patch.yml')
   ok('manifest: bundle patch file present', existsSync(path.join(PKG, 'cordis.patch.yml')))
   ok('manifest: files entries present', manifest.files.every((f) => existsSync(path.join(PKG, f.replace(/\/$/, '')))))

@@ -1,6 +1,6 @@
 # dsh-ntfy
 
-ntfy notification publishing plugin for DSH. Sends messages to [ntfy.sh](https://ntfy.sh) or a self-hosted ntfy server over channels declared in environment variables. Pure publisher: no subscribing, no retry, no credentials persisted.
+ntfy notification publishing plugin for DSH. Sends messages to [ntfy.sh](https://ntfy.sh) or a self-hosted ntfy server over channels declared in environment variables, optionally overridden by a config layer from a cordis patch file. Pure publisher: no subscribing, no retry, no credentials persisted.
 
 ## Installation
 
@@ -10,11 +10,11 @@ dsh-ntfy is an out-of-tree plugin for a dsh profile. Install it with the dsh plu
 dsh plugin --profile <name> add dsh-ntfy
 ```
 
-Configuration is environment only (below); no files are created.
+Configuration is environment plus an optional config layer from a cordis patch file (both below); the plugin creates no files.
 
 ## Configuration
 
-All configuration is environment; no files are created. One variable declares a channel; the rest are optional:
+The base configuration is environment; env changes take effect on a host restart. One variable declares a channel, the rest are optional:
 
 | Variable | Required | Meaning |
 |---|---|---|
@@ -31,7 +31,25 @@ NTFY_DEFAULT_CHANNEL=dash
 NTFY_DASH_TOPIC=dsh-alerts-Kx7pQm
 ```
 
-The `<NAME>` segment of the variable name is uppercase letters and digits only, and the channel name is its lowercased form; the channel name must match `^[a-z][a-z0-9-]{0,31}$` (unlike the topic charset, it allows no underscore and no leading digit), so e.g. `NTFY_A_B_TOPIC` or `NTFY_1TOPIC` declare no channel, and a lowercase segment such as `NTFY_dash_TOPIC` matches nothing at all. Invalid channels are dropped with a warning (boot is not affected). Env changes take effect on a host restart.
+The `<NAME>` segment of the variable name is uppercase letters and digits only, and the channel name is its lowercased form; the channel name must match `^[a-z][a-z0-9-]{0,31}$` (unlike the topic charset, it allows no underscore and no leading digit), so e.g. `NTFY_A_B_TOPIC` or `NTFY_1TOPIC` declare no channel, and a lowercase segment such as `NTFY_dash_TOPIC` matches nothing at all. Invalid channels are dropped with a warning (boot is not affected).
+
+### Config layer (cordis patch)
+
+An optional config layer sits on top of the env block: a patch entry targeting the plugin id `dsh-ntfy` (the profile's `cordis.patch.yml`, the user-global `~/.dsh/cordis.patch.yml`, or a `--patch` overlay) carries a `config` object whose keys are camelCase mirrors of the env fields - `defaultChannel` and `channels` (a map of channel name to `topic`, `server`, `user`, `pass`, `token`). Every key is optional.
+
+```yaml
+- id: dsh-ntfy
+  config:
+    defaultChannel: dash
+    channels:
+      dash:
+        server: https://ntfy.example.com
+```
+
+- One precedence chain: delivered value > env value > built-in default; keys the layer omits resolve as the env block, so `config: {}` (or no entry) is exactly the env-only behavior.
+- A patch targets a row by id and replaces its whole config - no deep merge, so a layer that overrides one field restates the fields it keeps (layer order: the plugin's own default entry, the profile patch, the user-global patch, any `--patch` overlay).
+- The layer is validated before the plugin starts: an unknown key or a topic outside the charset fails the plugin entry at load; channels the parser drops (half Basic auth pair, token together with Basic auth, an invalid topic) only warn, as in the env block, and a layer-declared channel with no topic in either layer warns as not a channel.
+- With the live patch reload, editing the patch file re-runs the plugin without a restart; otherwise the change applies at the next restart.
 
 ## Usage
 

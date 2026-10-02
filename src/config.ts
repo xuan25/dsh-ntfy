@@ -6,6 +6,13 @@
 // Invalid channels are dropped with a warning (boot never fails); the
 // NTFY_DEFAULT_CHANNEL value is stored raw and resolved at call time, so a stale
 // default only fails the sends that rely on it.
+// An optional config layer (a patch entry targeting this plugin's id, delivered
+// by the cordis loader) carries the same fields, camelCase, as explicit values;
+// it is folded onto a copy of the env record before parsing: a delivered field
+// is an explicit value (it beats the env value, which beats the built-in
+// default); fields the layer omits resolve as the env contract. Layer
+// composition (which patch layer wins, no deep merge) is cordis semantics: the
+// plugin sees only the one object the loader delivers.
 import type { ChannelAuth, ChannelConfig, NtfyConfig } from './types.js'
 
 /** Topic charset: 1-64 of -_A-Za-z0-9 (the ntfy server's own topic grammar). */
@@ -130,4 +137,74 @@ export function resolveChannel(cfg: NtfyConfig, explicit: string | undefined): R
   return {
     error: `no channel specified and no default channel configured (valid channels: ${valid || 'none'}; set NTFY_DEFAULT_CHANNEL or name a channel)`,
   }
+}
+
+/**
+ * One channel of the delivered config layer (the camelCase mirror of the
+ * per-channel env keys; all keys optional - a key absent here resolves as the
+ * env contract (see foldConfig)).
+ */
+export interface DeliveredChannelConfig {
+  topic?: string
+  server?: string
+  user?: string
+  pass?: string
+  token?: string
+}
+
+/**
+ * The delivered config layer (validated by the plugin's static Config schema
+ * before it reaches the constructor). All keys optional; undefined or {} is
+ * exactly the env-only behavior.
+ */
+export interface DeliveredConfig {
+  defaultChannel?: string
+  channels?: Record<string, DeliveredChannelConfig>
+}
+
+/** Per-channel field set (camelCase config key to env variable suffix). */
+const CONFIG_FIELD_TO_ENV: Record<string, string> = {
+  topic: 'TOPIC',
+  server: 'SERVER',
+  user: 'USER',
+  pass: 'PASS',
+  token: 'TOKEN',
+}
+
+/**
+ * Fold the delivered config layer onto a copy of the env record and parse the
+ * merged record. The parser is the single authority: a delivered field is an
+ * explicit value (it beats the env value, which beats the built-in default),
+ * fields the layer omits resolve as the env contract. A layer-declared channel
+ * that carries no topic in either layer is not a channel; it is reported with a
+ * warning (the input env is never mutated).
+ * @param env env record (process.env at boot, or a test fixture).
+ * @param config the delivered layer (undefined or {} = env-only behavior).
+ * @param warn channel-drop / no-topic reporting hook (the plugin init wires it to the logger).
+ * @returns the validated channel set (sorted by name) plus the raw default channel name.
+ */
+export function foldConfig(
+  env: Record<string, string | undefined>,
+  config: DeliveredConfig | undefined,
+  warn: (msg: string) => void,
+): NtfyConfig {
+  if (!config) return parseEnv(env, warn)
+  const merged: Record<string, string | undefined> = { ...env }
+  if (config.defaultChannel !== undefined) merged.NTFY_DEFAULT_CHANNEL = config.defaultChannel
+  for (const [name, fields] of Object.entries(config.channels ?? {})) {
+    for (const [key, value] of Object.entries(fields)) {
+      if (value === undefined || value === null) continue
+      const suffix = CONFIG_FIELD_TO_ENV[key]
+      if (suffix === undefined) continue
+      merged[`NTFY_${name.toUpperCase()}_${suffix}`] = value
+    }
+  }
+  const cfg = parseEnv(merged, warn)
+  const parsed = new Set(cfg.channels.map((c) => c.name))
+  for (const [name, fields] of Object.entries(config.channels ?? {})) {
+    if (!parsed.has(name) && env[`NTFY_${name.toUpperCase()}_TOPIC`] === undefined && fields.topic === undefined) {
+      warn(`channel "${name}" (config layer) has no topic in either layer; it is not a channel (set topic or drop the entry)`)
+    }
+  }
+  return cfg
 }
