@@ -14,11 +14,12 @@ dsh-ntfy is an out-of-tree plugin for a dsh profile. Install it with the dsh plu
 dsh plugin --profile <name> add dsh-ntfy
 ```
 
-Configuration is environment plus an optional config layer from a cordis patch file (both below); the plugin creates no files.
+Configuration is layered: built-in defaults, the `NTFY_*` env block, and a
+cordis config layer (see below); the plugin creates no files.
 
 ## Configuration
 
-The base configuration is environment; env changes take effect on a host restart. One variable declares a channel, the rest are optional:
+The env block is static per process boot; env changes take effect on a host restart. One variable declares a channel, the rest are optional:
 
 | Variable | Required | Meaning |
 |---|---|---|
